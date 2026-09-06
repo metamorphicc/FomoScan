@@ -25,6 +25,8 @@ from typing import Any
 DEFAULT_RPC = "https://rpc.mainnet.chain.robinhood.com"
 LAUNCHPAD = "0xd0C05B22C36C63eB149DDF6e4C02713d7330f870"
 DEPLOY_BLOCK = 0x323A7D0
+DEFAULT_CACHE = ".fomo_scan_cache.json"
+CACHE_VERSION = 1
 
 LAUNCHED_TOPIC = "0x2d2bd1a5aaf7744f0061b1c255d3c8b41eb5debab892708d5500cb1dcc566ded"
 TRADE_TOPIC = "0x1be275ed3beea0f65bdbeeb8302e524f8bc596dc41b1312209c5d90f9de38745"
@@ -40,6 +42,16 @@ class RpcError(RuntimeError):
 
 class RateLimitError(RpcError):
     pass
+
+
+@dataclass
+class ScanResult:
+    rows: list[dict[str, Any]]
+    latest_block: int | None
+    log_count: int
+    cached: bool = False
+    cache_only: bool = False
+    warning: str | None = None
 
 
 @dataclass
@@ -309,39 +321,70 @@ def get_logs(client: JsonRpcClient, from_block: int, to_block: int, chunk_size: 
     return logs
 
 
-def block_timestamp(client: JsonRpcClient, block_number: int, cache: dict[int, int]) -> int | None:
-    if block_number in cache:
-        return cache[block_number]
-    result = client.call("eth_getBlockByNumber", [hex(block_number), False])
-    if not result or not result.get("timestamp"):
+def load_cache(path: str) -> dict[str, Any] | None:
+    if not path or not os.path.exists(path):
         return None
-    timestamp = hex_to_int(result["timestamp"])
-    cache[block_number] = timestamp
-    return timestamp
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if data.get("version") != CACHE_VERSION:
+        return None
+    if data.get("launchpad", "").lower() != LAUNCHPAD.lower():
+        return None
+    return data
+
+
+def save_cache(path: str, latest_block: int, logs: list[dict[str, Any]], timestamps: dict[int, int]) -> None:
+    if not path:
+        return
+    data = {
+        "version": CACHE_VERSION,
+        "launchpad": LAUNCHPAD,
+        "latest_block": latest_block,
+        "saved_at": int(time.time()),
+        "logs": logs,
+        "timestamps": {str(block): timestamp for block, timestamp in timestamps.items()},
+    }
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, separators=(",", ":"))
+
+
+def log_key(log: dict[str, Any]) -> tuple[str, str]:
+    return (log.get("transactionHash", ""), log.get("logIndex", ""))
+
+
+def merge_logs(cached_logs: list[dict[str, Any]], fresh_logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged = {log_key(log): log for log in cached_logs}
+    for log in fresh_logs:
+        merged[log_key(log)] = log
+    return sorted(
+        merged.values(),
+        key=lambda item: (hex_to_int(item["blockNumber"]), hex_to_int(item["logIndex"])),
+    )
 
 
 def hydrate_timestamps(
     client: JsonRpcClient,
     launches: dict[str, Launch],
     stats: dict[str, TokenStats],
+    cache: dict[int, int] | None = None,
 ) -> None:
+    cache = cache if cache is not None else {}
     block_numbers = {launch.block_number for launch in launches.values()}
     block_numbers.update(stat.last_trade_block for stat in stats.values() if stat.last_trade_block)
-    ordered = sorted(block_numbers)
-    if not ordered:
-        return
-
-    results = client.batch_call([("eth_getBlockByNumber", [hex(block), False]) for block in ordered])
-    timestamps = {
-        block: hex_to_int(result["timestamp"])
-        for block, result in zip(ordered, results)
-        if result and result.get("timestamp")
-    }
+    missing = sorted(block for block in block_numbers if block not in cache)
+    if missing:
+        results = client.batch_call([("eth_getBlockByNumber", [hex(block), False]) for block in missing])
+        for block, result in zip(missing, results):
+            if result and result.get("timestamp"):
+                cache[block] = hex_to_int(result["timestamp"])
     for launch in launches.values():
-        launch.timestamp = timestamps.get(launch.block_number)
+        launch.timestamp = cache.get(launch.block_number)
     for stat in stats.values():
         if stat.last_trade_block:
-            stat.last_trade_ts = timestamps.get(stat.last_trade_block)
+            stat.last_trade_ts = cache.get(stat.last_trade_block)
 
 
 def rebuild(logs: list[dict[str, Any]]) -> tuple[dict[str, Launch], dict[str, TokenStats]]:
@@ -395,6 +438,23 @@ def score_token(launch: Launch, stat: TokenStats, now: int) -> float:
         - sell_penalty
         - age_penalty
     )
+
+
+def explain_token(launch: Launch, stat: TokenStats, now: int) -> str:
+    reasons = []
+    if launch.timestamp:
+        reasons.append(f"age {fmt_age(launch.timestamp, now)}")
+    if len(stat.unique_buyers) >= 2:
+        reasons.append(f"{len(stat.unique_buyers)} buyers")
+    if stat.buy_count:
+        reasons.append(f"{stat.buy_count} buys")
+    if eth(stat.net_eth) > 0:
+        reasons.append(f"+{fmt_eth(stat.net_eth)} ETH net")
+    if stat.sell_ratio <= 0.35 and stat.trade_count:
+        reasons.append("low sell pressure")
+    if launch.graduated or stat.on_pool_trades:
+        reasons.append("graduated/pool")
+    return ", ".join(reasons) if reasons else "fresh launch"
 
 
 def fmt_eth(value: int) -> str:
@@ -482,6 +542,7 @@ def rows_for_output(
                 "volume_eth": round(eth(stat.volume_eth), 8),
                 "sell_ratio": round(stat.sell_ratio, 4),
                 "graduated": launch.graduated or stat.on_pool_trades > 0,
+                "why": explain_token(launch, stat, now),
                 "url": token_url(launch.token),
                 "tx": launch.tx_hash,
             }
@@ -495,9 +556,9 @@ def print_table(rows: list[dict[str, Any]]) -> None:
         print("No tokens matched the filters.")
         return
 
-    headers = ["score", "sym", "age", "buys", "sells", "buyers", "net ETH", "vol ETH", "token", "url"]
+    headers = ["score", "sym", "age", "buys", "sells", "buyers", "net ETH", "vol ETH", "token", "why"]
     print(" | ".join(headers))
-    print("-" * 118)
+    print("-" * 132)
     for row in rows:
         print(
             " | ".join(
@@ -511,10 +572,11 @@ def print_table(rows: list[dict[str, Any]]) -> None:
                     f"{row['net_eth']:>7}",
                     f"{row['volume_eth']:>7}",
                     short_addr(row["token"]),
-                    row["url"],
+                    row["why"][:46],
                 ]
             )
         )
+        print(f"      {row['url']}")
 
 
 def export_csv(path: str, rows: list[dict[str, Any]]) -> None:
@@ -524,17 +586,86 @@ def export_csv(path: str, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
-def scan_once(args: argparse.Namespace) -> list[dict[str, Any]]:
+def scan_once(args: argparse.Namespace) -> ScanResult:
     client = JsonRpcClient(args.rpc, timeout=args.timeout, retries=args.retries, transport=args.transport)
-    latest = hex_to_int(client.call("eth_blockNumber", []))
+    cache_data = None if args.no_cache or args.refresh_cache else load_cache(args.cache)
+    cached_logs = list(cache_data.get("logs", [])) if cache_data else []
+    timestamp_cache = {
+        int(block): int(timestamp)
+        for block, timestamp in (cache_data.get("timestamps", {}) if cache_data else {}).items()
+    }
+    warning = None
+
+    try:
+        latest = hex_to_int(client.call("eth_blockNumber", []))
+    except RateLimitError as exc:
+        if cached_logs:
+            launches, stats = rebuild(cached_logs)
+            hydrate_cached_timestamps(launches, stats, timestamp_cache)
+            rows = rows_for_output(launches, stats, args, int(time.time()))
+            return ScanResult(
+                rows=rows,
+                latest_block=cache_data.get("latest_block") if cache_data else None,
+                log_count=len(cached_logs),
+                cached=True,
+                cache_only=True,
+                warning=f"RPC rate-limited; showing cached data from {fmt_cache_time(cache_data)}",
+            )
+        raise exc
+
     from_block = args.from_block or DEPLOY_BLOCK
-    logs = get_logs(client, from_block, latest, args.chunk_size)
+    if cached_logs and not args.from_block:
+        cached_latest = int(cache_data.get("latest_block", DEPLOY_BLOCK - 1))
+        from_block = max(cached_latest + 1, DEPLOY_BLOCK)
+
+    try:
+        fresh_logs = get_logs(client, from_block, latest, args.chunk_size) if from_block <= latest else []
+        logs = merge_logs(cached_logs, fresh_logs)
+    except RateLimitError as exc:
+        if not cached_logs:
+            raise exc
+        logs = cached_logs
+        latest = int(cache_data.get("latest_block", latest)) if cache_data else latest
+        warning = f"RPC rate-limited while fetching logs; showing cached data from {fmt_cache_time(cache_data)}"
+
     launches, stats = rebuild(logs)
 
-    hydrate_timestamps(client, launches, stats)
+    try:
+        hydrate_timestamps(client, launches, stats, timestamp_cache)
+    except RateLimitError:
+        hydrate_cached_timestamps(launches, stats, timestamp_cache)
+        warning = warning or "RPC rate-limited while fetching block timestamps; ages may be incomplete"
+
+    if not args.no_cache:
+        save_cache(args.cache, latest, logs, timestamp_cache)
 
     now = int(time.time())
-    return rows_for_output(launches, stats, args, now)
+    return ScanResult(
+        rows=rows_for_output(launches, stats, args, now),
+        latest_block=latest,
+        log_count=len(logs),
+        cached=bool(cached_logs),
+        cache_only=logs == cached_logs and bool(cached_logs) and from_block <= latest,
+        warning=warning,
+    )
+
+
+def hydrate_cached_timestamps(
+    launches: dict[str, Launch],
+    stats: dict[str, TokenStats],
+    timestamp_cache: dict[int, int],
+) -> None:
+    for launch in launches.values():
+        launch.timestamp = timestamp_cache.get(launch.block_number)
+    for stat in stats.values():
+        if stat.last_trade_block:
+            stat.last_trade_ts = timestamp_cache.get(stat.last_trade_block)
+
+
+def fmt_cache_time(cache_data: dict[str, Any] | None) -> str:
+    if not cache_data or not cache_data.get("saved_at"):
+        return "local cache"
+    return datetime.fromtimestamp(int(cache_data["saved_at"]), tz=timezone.utc).isoformat()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -555,6 +686,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", help="Print JSON instead of a table")
     parser.add_argument("--csv", help="Also export matching rows to CSV")
     parser.add_argument("--watch", type=float, help="Repeat scan every N seconds")
+    parser.add_argument("--cache", default=DEFAULT_CACHE, help="Local cache file for logs and timestamps")
+    parser.add_argument("--no-cache", action="store_true", help="Disable local cache reads and writes")
+    parser.add_argument("--refresh-cache", action="store_true", help="Ignore existing cache and rebuild it")
+    parser.add_argument("--min-score", type=float, default=None, help="Only show rows with this score or higher")
     parser.add_argument("--timeout", type=float, default=20.0)
     parser.add_argument("--retries", type=int, default=3)
     parser.add_argument(
@@ -574,7 +709,7 @@ def main(argv: list[str] | None = None) -> int:
 
     while True:
         try:
-            rows = scan_once(args)
+            result = scan_once(args)
         except RateLimitError as exc:
             print(str(exc), file=sys.stderr)
             return 3
@@ -582,10 +717,19 @@ def main(argv: list[str] | None = None) -> int:
             print(f"RPC error: {exc}", file=sys.stderr)
             return 3
 
+        rows = result.rows
+        if args.min_score is not None:
+            rows = [row for row in rows if row["score"] >= args.min_score]
+
+        if result.warning:
+            print(result.warning, file=sys.stderr)
         if args.json:
             print(json.dumps(rows, ensure_ascii=False, indent=2))
         else:
             print_table(rows)
+            if rows:
+                source = "cache" if result.cache_only else "rpc"
+                print(f"\nsource={source} logs={result.log_count} latest_block={result.latest_block}")
         if args.csv:
             export_csv(args.csv, rows)
             print(f"\nCSV exported: {args.csv}")

@@ -10,6 +10,7 @@ It reads the public `FomoLaunchpad` contract logs directly from RPC, decodes `La
 - ETH volume
 - sell pressure
 - age penalty
+- human-readable `why` notes
 
 This is read-only. It does not trade, sign transactions, or touch private keys.
 
@@ -46,6 +47,11 @@ python .\fomo_scan.py --json
 python .\fomo_scan.py --csv .\matches.csv
 ```
 
+The scanner keeps a local `.fomo_scan_cache.json` by default. After the first
+successful run, later scans only request new blocks. If the public RPC hits a
+temporary rate limit, the script falls back to the last cached dataset instead
+of exiting with an empty result.
+
 ## Filters
 
 - `--max-age-hours 24` only keeps tokens launched in the last 24 hours.
@@ -53,8 +59,11 @@ python .\fomo_scan.py --csv .\matches.csv
 - `--min-buyers 2` requires at least 2 unique buyers.
 - `--min-net-eth 0.05` requires buys minus sells of at least 0.05 ETH.
 - `--max-sell-ratio 0.5` rejects tokens where sells are more than half of trades.
+- `--min-score 60` only shows stronger candidates.
 - `--curve-only` hides graduated tokens.
 - `--query TEXT` filters by name, symbol, description, or address.
+- `--refresh-cache` rebuilds the local cache from scratch.
+- `--no-cache` disables cache reads and writes.
 
 ## Source
 
