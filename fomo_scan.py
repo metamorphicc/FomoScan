@@ -1,11 +1,3 @@
-#!/usr/bin/env python3
-"""
-FomoPad fresh-token scanner.
-
-Reads the FomoLaunchpad contract on Robinhood Chain, rebuilds token launches and
-trades from public logs, then ranks tokens by simple tradability signals.
-"""
-
 from __future__ import annotations
 
 import argparse

@@ -78,7 +78,3 @@ The script scans logs from deployment by default. If you only want a recent bloc
 ```powershell
 python .\fomo_scan.py --from-block 0x3500000
 ```
-
-## Notes
-
-The score is a heuristic, not financial advice. Use it as a shortlisting tool, then inspect the token page and on-chain activity before touching a position.
