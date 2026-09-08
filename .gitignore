@@ -1,4 +1,5 @@
 __pycache__/
 *.py[cod]
 matches.csv
+.fomo_scan_cache.json
 .env

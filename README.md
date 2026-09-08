@@ -28,6 +28,9 @@ python .\fomo_scan.py
 python .\fomo_scan.py
 ```
 
+By default, the first run scans only the latest `200000` blocks. That keeps the
+tool focused on fresh launches and avoids hammering the public RPC.
+
 More selective:
 
 ```powershell
@@ -64,6 +67,8 @@ of exiting with an empty result.
 - `--query TEXT` filters by name, symbol, description, or address.
 - `--refresh-cache` rebuilds the local cache from scratch.
 - `--no-cache` disables cache reads and writes.
+- `--lookback-blocks 500000` changes the first-run recent block window.
+- `--all-history` scans from the launchpad deployment block.
 
 ## Source
 
@@ -73,8 +78,14 @@ Default network settings are taken from FomoPad public docs:
 - FomoLaunchpad: `0xd0C05B22C36C63eB149DDF6e4C02713d7330f870`
 - deployment block: `0x323a7d0`
 
-The script scans logs from deployment by default. If you only want a recent block range:
+If you want a specific block range:
 
 ```powershell
 python .\fomo_scan.py --from-block 0x3500000
+```
+
+For a full historical rebuild:
+
+```powershell
+python .\fomo_scan.py --all-history --refresh-cache
 ```

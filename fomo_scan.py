@@ -17,6 +17,7 @@ from typing import Any
 DEFAULT_RPC = "https://rpc.mainnet.chain.robinhood.com"
 LAUNCHPAD = "0xd0C05B22C36C63eB149DDF6e4C02713d7330f870"
 DEPLOY_BLOCK = 0x323A7D0
+DEFAULT_LOOKBACK_BLOCKS = 200_000
 DEFAULT_CACHE = ".fomo_scan_cache.json"
 CACHE_VERSION = 1
 
@@ -605,10 +606,15 @@ def scan_once(args: argparse.Namespace) -> ScanResult:
             )
         raise exc
 
-    from_block = args.from_block or DEPLOY_BLOCK
-    if cached_logs and not args.from_block:
+    if args.from_block is not None:
+        from_block = args.from_block
+    elif args.all_history:
+        from_block = DEPLOY_BLOCK
+    elif cached_logs:
         cached_latest = int(cache_data.get("latest_block", DEPLOY_BLOCK - 1))
         from_block = max(cached_latest + 1, DEPLOY_BLOCK)
+    else:
+        from_block = max(DEPLOY_BLOCK, latest - args.lookback_blocks + 1)
 
     try:
         fresh_logs = get_logs(client, from_block, latest, args.chunk_size) if from_block <= latest else []
@@ -666,6 +672,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--rpc", default=os.getenv("FOMO_RPC", DEFAULT_RPC), help="Robinhood Chain RPC URL")
     parser.add_argument("--from-block", type=lambda value: int(value, 0), default=None)
+    parser.add_argument(
+        "--lookback-blocks",
+        type=int,
+        default=DEFAULT_LOOKBACK_BLOCKS,
+        help="Initial fresh-token block lookback when there is no cache",
+    )
+    parser.add_argument("--all-history", action="store_true", help="Scan from launchpad deployment block")
     parser.add_argument("--chunk-size", type=int, default=5_000_000, help="eth_getLogs block range per request")
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--max-age-hours", type=float, default=None, help="Only tokens launched within this age")
