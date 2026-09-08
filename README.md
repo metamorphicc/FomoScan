@@ -1,6 +1,33 @@
 # FomoPad Fresh Token Scanner
 
-Terminal scanner for fresh FomoPad tokens on Robinhood Chain.
+Live terminal panel and scanner for fresh FomoPad tokens on Robinhood Chain.
+
+## Console Panel
+
+Start the cyclic terminal panel:
+
+```powershell
+python .\console_panel.py
+```
+
+It scans every 30 seconds by default, clears the terminal, prints the current
+shortlist, marks tokens that appear for the first time in the running session,
+and keeps going until `Ctrl+C`.
+
+Useful runs:
+
+```powershell
+python .\console_panel.py --min-buyers 2 --min-score 40
+python .\console_panel.py --interval 15 --lookback-blocks 500000
+python .\console_panel.py --show-urls
+```
+
+For stable long-running monitoring, use your own RPC:
+
+```powershell
+$env:FOMO_RPC="https://robinhood-mainnet.g.alchemy.com/v2/YOUR_KEY"
+python .\console_panel.py
+```
 
 It reads the public `FomoLaunchpad` contract logs directly from RPC, decodes `Launched` and `Trade` events, then ranks tokens by simple tradability signals:
 
