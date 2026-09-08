@@ -32,6 +32,38 @@ RED = "\033[31m"
 CYAN = "\033[36m"
 
 
+def visible_len(text: str) -> int:
+    length = 0
+    in_escape = False
+    for char in text:
+        if char == "\033":
+            in_escape = True
+        elif in_escape and char == "m":
+            in_escape = False
+        elif not in_escape:
+            length += 1
+    return length
+
+
+def pad_cell(text: Any, width: int, align: str = "left") -> str:
+    value = str(text)
+    missing = max(0, width - visible_len(value))
+    if align == "right":
+        return " " * missing + value
+    return value + " " * missing
+
+
+def table_rule(columns: list[tuple[str, int, str]]) -> str:
+    return "+" + "+".join("-" * (width + 2) for _name, width, _align in columns) + "+"
+
+
+def table_row(values: list[Any], columns: list[tuple[str, int, str]]) -> str:
+    cells = []
+    for value, (_name, width, align) in zip(values, columns):
+        cells.append(" " + pad_cell(value, width, align) + " ")
+    return "|" + "|".join(cells) + "|"
+
+
 def clear_screen() -> None:
     os.system("cls" if os.name == "nt" else "clear")
 
@@ -140,31 +172,46 @@ def render(
         print(color("No matching tokens right now. Waiting for the next scan.", DIM, use_color))
         return
 
-    symbol_w = 12
-    why_w = max(22, min(50, width - 78))
-    print(
-        f"{'NEW':<3} {'SCORE':>6} {'SYMBOL':<{symbol_w}} {'AGE':>7} "
-        f"{'BUY':>4} {'SELL':>4} {'BUYERS':>6} {'NET ETH':>12} {'TOKEN':<13} WHY"
-    )
-    print("-" * min(width, 120))
+    why_w = max(18, min(46, width - 94))
+    columns = [
+        ("NEW", 3, "left"),
+        ("SCORE", 6, "right"),
+        ("SYMBOL", 12, "left"),
+        ("AGE", 7, "right"),
+        ("BUY", 4, "right"),
+        ("SELL", 4, "right"),
+        ("BUYERS", 6, "right"),
+        ("NET ETH", 12, "right"),
+        ("TOKEN", 13, "left"),
+        ("WHY", why_w, "left"),
+    ]
+    print(table_rule(columns))
+    print(table_row([name for name, _width, _align in columns], columns))
+    print(table_rule(columns))
     for row in rows:
         token = row["token"].lower()
         is_new = token not in seen
         marker = color("NEW", GREEN, use_color) if is_new else "   "
         print(
-            marker
-            + f" {row['score']:>6.1f} "
-            + f"{trim(row['symbol'], symbol_w):<{symbol_w}} "
-            + f"{row['age']:>7} "
-            + f"{row['buys']:>4} "
-            + f"{row['sells']:>4} "
-            + f"{row['buyers']:>6} "
-            + f"{flow(float(row['net_eth']), use_color):>12} "
-            + f"{short_addr(row['token']):<13} "
-            + trim(row["why"], why_w)
+            table_row(
+                [
+                    marker,
+                    f"{row['score']:.1f}",
+                    trim(row["symbol"], 12),
+                    row["age"],
+                    row["buys"],
+                    row["sells"],
+                    row["buyers"],
+                    flow(float(row["net_eth"]), use_color),
+                    short_addr(row["token"]),
+                    trim(row["why"], why_w),
+                ],
+                columns,
+            )
         )
         if args.show_urls:
             print(color(f"    {row['url']}", DIM, use_color))
+    print(table_rule(columns))
 
 
 def run_panel(args: argparse.Namespace) -> int:
